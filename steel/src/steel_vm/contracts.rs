@@ -154,6 +154,7 @@ impl FlatContractExt for FlatContract {
                     stack_index,
                     use_callbacks,
                     apply_contracts,
+                    None,
                 )
             }
             _ => stop!(TypeMismatch => "contract expected a function"; *cur_inst_span),
@@ -172,7 +173,8 @@ pub(crate) trait FunctionContractExt {
     fn apply<CT: ConstantTable, U: UseCallbacks, A: ApplyContracts>(
         &self,
         name: &Option<String>,
-        function: &ByteCodeLambda,
+        // function: &Gc<ByteCodeLambda>,
+        function: &SteelVal,
         arguments: &[SteelVal],
         constants: &CT,
         cur_inst_span: &Span,
@@ -191,7 +193,8 @@ impl FunctionContractExt for FunctionContract {
     fn apply<CT: ConstantTable, U: UseCallbacks, A: ApplyContracts>(
         &self,
         name: &Option<String>,
-        function: &ByteCodeLambda,
+        // function: &Gc<ByteCodeLambda>,
+        function: &SteelVal,
         arguments: &[SteelVal],
         constants: &CT,
         cur_inst_span: &Span,
@@ -234,7 +237,7 @@ impl FunctionContractExt for FunctionContract {
                             self.contract_attachment_location, name
                         );
 
-                        let message = format!("This function call caused an error - an occured in the domain position: {}, with the contract: {}, {}, blaming: {:?} (callsite)", i, self.to_string(), e.to_string(), self.contract_attachment_location);
+                        let message = format!("This function call caused an error - it occured in the domain position: {}, with the contract: {}, {}, blaming: {:?} (callsite)", i, self.to_string(), e.to_string(), self.contract_attachment_location);
 
                         stop!(ContractViolation => message; *cur_inst_span);
                     }
@@ -271,30 +274,67 @@ impl FunctionContractExt for FunctionContract {
                         verified_args.push(new_arg);
                     }
 
+                    _ => verified_args.push(
+                        ContractedFunction::new(fc.clone(), arg.clone(), name.clone()).into(),
+                    ),
                     // TODO fix name, don't pass in None
-                    SteelVal::Closure(c) => verified_args
-                        .push(ContractedFunction::new(fc.clone(), c.clone(), name.clone()).into()),
-                    _ => {
-                        stop!(ContractViolation => "contracts not yet supported with non user defined"; *cur_inst_span)
-                    }
+                    // SteelVal::Closure(c) => verified_args
+                    //     .push(ContractedFunction::new(fc.clone(), c.clone(), name.clone()).into()),
+                    // _ => {
+                    //     stop!(ContractViolation => "contracts not yet supported with non user defined"; *cur_inst_span)
+                    // }
                 },
             }
         }
 
-        let output = {
-            vm(
-                function.body_exp(),
-                &mut verified_args.into(),
-                global_env, // TODO remove this as well
-                constants,
-                callback,
-                upvalue_heap,
-                &mut Vec::new(),
-                &mut Stack::new(),
-                use_callbacks,
-                apply_contracts,
-            )
-        }?;
+        let output = match function {
+            SteelVal::Closure(function) => {
+                function_stack.push(Gc::clone(function));
+
+                vm(
+                    function.body_exp(),
+                    &mut verified_args.into(),
+                    global_env, // TODO remove this as well
+                    constants,
+                    callback,
+                    upvalue_heap,
+                    function_stack,
+                    &mut Stack::new(),
+                    use_callbacks,
+                    apply_contracts,
+                    None,
+                )?
+            }
+            SteelVal::BoxedFunction(f) => {
+                // f(&[local, const_value]).map_err(|x| x.set_span(*span))?)
+                // self.ip += 4;
+                // todo!()
+                f(&verified_args).map_err(|x| x.set_span(*cur_inst_span))?
+            }
+            SteelVal::FuncV(f) => {
+                // self.stack
+                // .push(f(&[local, const_value]).map_err(|x| x.set_span(*span))?);
+                // self.ip += 4;
+                // todo!()
+
+                f(&verified_args).map_err(|x| x.set_span(*cur_inst_span))?
+            }
+            SteelVal::FutureFunc(f) => {
+                // let result = SteelVal::FutureV(Gc::new(
+                // f(&[local, const_value]).map_err(|x| x.set_span(*span))?,
+                // ));
+
+                // self.stack.push(result);
+                // self.ip += 4;
+                // todo!()
+                SteelVal::FutureV(Gc::new(
+                    f(&verified_args).map_err(|x| x.set_span(*cur_inst_span))?,
+                ))
+            }
+            _ => {
+                todo!("Implement contract application for non bytecode values");
+            }
+        };
 
         match self.post_condition().as_ref() {
             ContractType::Flat(f) => {
@@ -376,12 +416,13 @@ impl FunctionContractExt for FunctionContract {
                 }
 
                 // TODO don't pass in None
-                SteelVal::Closure(c) => {
-                    Ok(ContractedFunction::new(fc.clone(), c, name.clone()).into())
-                }
-                _ => {
-                    stop!(ContractViolation => "contracts not yet supported with non user defined"; *cur_inst_span)
-                }
+                // SteelVal::Closure(c) => {
+                //     Ok(ContractedFunction::new(fc.clone(), c, name.clone()).into())
+                // }
+                // _ => {
+                //     stop!(ContractViolation => "contracts not yet supported with non user defined"; *cur_inst_span)
+                // }
+                _ => Ok(ContractedFunction::new(fc.clone(), output, name.clone()).into()),
             },
         }
     }
